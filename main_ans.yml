@@ -1,0 +1,137 @@
+---
+- name: "Install {{ app }} & {{ sql }} on the vm"
+  gather_facts: false
+  hosts: "all"
+  vars:
+    sql: "MariaDB"
+    app: "Gitea"
+  user: "ubuntu"
+
+  tasks:
+    - name: "Update apt cache."
+      become: true
+      apt:
+        update_cache: true
+        cache_valid_time: 1800
+
+    - name: "Install the great Swedish {{ sql }} free SQL server & client."
+      become: true
+      apt:
+        name:
+          - "mariadb-server"
+          - "mariadb-client"
+          - "python3-mysqldb"
+        state: "latest"
+
+    - name: "Change the config file for {{ sql }} to not only bind to localhost to bind to everything (very very unsecure but its not exposed to the internet)"
+      become: true
+      replace:
+        path: "/etc/mysql/mariadb.conf.d/50-server.cnf"
+        regexp: "^bind-address"
+        replace: "#bind-address"
+
+    - name: "Restart the deamon {{ sql }} to make the change of config to take affect"
+      become: true
+      systemd:
+        name: "mariadb"
+        enabled: true
+        state: "restarted"
+
+    - name: "Create git user"
+      become: true
+      user:
+        name: "git"
+        comment: "GIT Version Control"
+        shell: "/bin/bash"
+        system: true
+        home: "/home/git"
+
+    - name: "Lets see what the latests version of {{ app }} thought json file"
+      uri:
+        url: "https://dl.gitea.com/gitea/version.json"
+        return_content: true
+      register: "gitealatestversion"
+
+    - name: "Create the gitea directory structure for data storage"
+      become: true
+      file:
+        path: "/home/git/gitea/data/conf"
+        state: "directory"
+        owner: "git"
+        group: "git"
+
+    - name: "Get {{ app }} the latest and greatest ver: {{ gitealatestversion.json.latest.version }}"
+      become: true
+      get_url:
+        url: "https://dl.gitea.io/gitea/{{ gitealatestversion.json.latest.version }}/gitea-{{ gitealatestversion.json.latest.version }}-linux-amd64"
+        dest: "/home/git/gitea/gitea"
+        mode: "u+x"
+        owner: "git"
+        group: "git"
+
+    - name: "Get the service file for {{ app }}"
+      become: true
+      get_url:
+        url: "https://raw.githubusercontent.com/go-gitea/gitea/main/contrib/systemd/gitea.service"
+        dest: "/etc/systemd/system/gitea.service"
+        mode: "u+x"
+
+    - name: "Change the service file for our needs, to change its directory and change where it's located"
+      become: true
+      lineinfile:
+        path: "/etc/systemd/system/gitea.service"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backrefs: true
+      loop:
+        - { regexp: "^WorkingDirectory=", line: "WorkingDirectory=/home/git/gitea" }
+        - { regexp: "^ExecStart=", line: "ExecStart=/home/git/gitea/gitea web --config /home/git/gitea/data/conf/app.ini" }
+        - { regexp: "^Environment=", line: "Environment=USER=git HOME=/home/git GITEA_WORK_DIR=/home/git/gitea" }
+        - { regexp: "^#(Wants=mariadb.*)", line: "\\1" }
+        - { regexp: "^#(After=mariadb.*)", line: "\\1" }
+
+    - name: "Create a new database with name gitea with the correct charset set"
+      become: true
+      community.mysql.mysql_db:
+        name: "gitea"
+        state: "present"
+        encoding: "utf8mb4"
+
+    - name: "Create database user with name gitea and password with all database privileges"
+      become: true
+      community.mysql.mysql_user:
+        name: "gitea"
+        password: "gitea"
+        priv: "*.*:ALL"
+        state: "present"
+
+    - name: "Create the Gitea Config app.ini"
+      become: true
+      copy:
+        dest: "/home/git/gitea/data/conf/app.ini"
+        owner: "git"
+        group: "git"
+        content: |
+          APP_NAME = Gitea: My own cloud GIT Repo
+
+          [database]
+          DB_TYPE = mysql
+          HOST    = localhost:3306
+          NAME    = gitea
+          USER    = gitea
+          PASSWD  = gitea
+
+          [server]
+          SSH_DOMAIN = localhost
+          DOMAIN     = localhost
+          ROOT_URL   = http://localhost/
+
+          [security]
+          INSTALL_LOCK   = true
+
+    - name: "Start the deamon {{ app }} to make the change of config to take affect"
+      become: true
+      systemd:
+        name: "gitea"
+        enabled: true
+        state: "restarted"
